@@ -43,6 +43,52 @@ async def get_root() -> HTMLResponse:
     return HTMLResponse("index.html")
 
 
+@app_api.post("/tweets")
+async def post_tweet(tweet: schemas.TweetIn,
+                     session: AsyncSession = Depends(async_get_db),
+                     api_key: str = Header(None)):
+    """Эндпойнт добавления нового твита"""
+
+    res_user = await session.execute(select(models.User).filter(models.User.api_key == api_key))
+    user = res_user.scalar()
+    new_tweet = models.Tweet(content=tweet.tweet_data, user_id=user.id)
+    session.add(new_tweet)
+    await session.commit()
+
+    if tweet.tweet_media_ids:
+        res = await session.execute(select(models.Image).filter(
+            models.Image.id.in_(tweet.tweet_media_ids)
+        ))
+        images = res.scalars().all()
+        for image in images:
+            image.tweet_id = new_tweet.id
+        await session.commit()
+
+    response = {"result": True, "tweet_id": new_tweet.id}
+    return JSONResponse(content=jsonable_encoder(response), status_code=201)
+
+
+@app_api.post("/medias")
+async def download_image_from_tweet(file: UploadFile = File(...),
+                                    session: AsyncSession = Depends(async_get_db),
+                                    api_key: str = Header(None)):
+    """Эндпойнт для загрузки картинок из твита"""
+
+    os.makedirs(OUT_PATH, exist_ok=True)
+
+    file_path = "{}/{}".format(OUT_PATH, file.filename)
+    with open(file_path, mode='wb') as f:
+        shutil.copyfileobj(file.file, f)
+
+
+    new_image = models.Image(url=f"api{file_path}")
+    session.add(new_image)
+    await session.commit()
+
+    response = {"result": True, "media_id": new_image.id}
+    return JSONResponse(content=jsonable_encoder(response), status_code=201)
+
+
 @app_api.get("/app/images/{file_name}")
 async def get_image_from_dir(file_name: str):
     """Эндпойнт для загрузки сохраненных картинок в ленту с твитами"""
@@ -50,49 +96,30 @@ async def get_image_from_dir(file_name: str):
     return FileResponse(file_path)
 
 
-@app_api.get("/users/me")
-async def get_current_user_info(session: AsyncSession = Depends(async_get_db),
-                                api_key: str = Header(None)):
-    """Эндпойнт получения информации о своём профиле + создание нового пользователя"""
+@app_api.delete("/tweets/{tweet_id}")
+async def delete_tweet_by_id(tweet_id: int, session: AsyncSession = Depends(async_get_db), api_key: str = Header(None)):
+    """Эндпойнт для удаления пользователем своего твита по id"""
 
-    if not api_key:
-        response = jsonable_encoder({"message": "Please, provide http-header 'Api-key' in your request"})
-        return JSONResponse(content=response, status_code=400)
-    else:
-        res = await session.execute(select(models.User).where(
-            models.User.api_key == api_key).options(
-            selectinload(models.User.following),
-                    selectinload(models.User.subscribers))
-        )
-        user = res.scalar()
+    res_user = await session.execute(select(models.User).filter(models.User.api_key == api_key))
+    user = res_user.scalar()
 
-        if not user:
-            user = models.User(name=random.choice(NAMES), api_key=api_key)
-            session.add(user)
-            await session.commit()
+    res_tweet = await session.execute(select(models.Tweet).filter(
+        models.Tweet.id == tweet_id, models.Tweet.user_id == user.id
+    ))
+    tweet = res_tweet.scalar()
 
-            return {
-                "result": True,
-                "user": {
-                    "id": user.id,
-                    "name": user.name,
-                    "followers": [],
-                    "following": [],
-                },
-            }
-
-        followers = [{"id": follower.id, "name": follower.name} for follower in user.subscribers]
-        following = [{"id": following.id, "name": following.name} for following in user.following]
-
-        return {
-            "result": True,
-            "user": {
-                "id": user.id,
-                "name": user.name,
-                "followers": followers,
-                "following": following,
-            },
+    if not tweet:
+        response = {
+            "result": False,
+            "error_type": "PermissionError",
+            "error_message": "User does not have permission to delete the tweet"
         }
+        return JSONResponse(content=jsonable_encoder(response), status_code=400)
+
+    await session.delete(tweet)
+    await session.commit()
+
+    return {"result": True}
 
 
 @app_api.post("/tweets/{tweet_id}/likes")
@@ -192,30 +219,72 @@ async def unsubscribe_from_user(user_id: int,
     return {"result": True}
 
 
-@app_api.delete("/tweets/{tweet_id}")
-async def delete_tweet_by_id(tweet_id: int, session: AsyncSession = Depends(async_get_db), api_key: str = Header(None)):
-    """Эндпойнт для удаления пользователем своего твита по id"""
+@app_api.get("/tweets")
+async def get_tweets_list(session: AsyncSession = Depends(async_get_db),
+                          api_key: str = Header(None)):
+    """Эндпойнт получения ленты с твитами"""
 
-    res_user = await session.execute(select(models.User).filter(models.User.api_key == api_key))
-    user = res_user.scalar()
+    res_tweets = await session.execute(select(models.Tweet))
+    tweets = res_tweets.scalars().all()
+    tweets_data = []
 
-    res_tweet = await session.execute(select(models.Tweet).filter(
-        models.Tweet.id == tweet_id, models.Tweet.user_id == user.id
-    ))
-    tweet = res_tweet.scalar()
-
-    if not tweet:
-        response = {
-            "result": False,
-            "error_type": "PermissionError",
-            "error_message": "User does not have permission to delete the tweet"
+    for tweet in tweets:
+        attachments = [image.url for image in tweet.image]
+        likes = [{"user_id": like.user.id, "name": like.user.name} for like in tweet.likes]
+        tweet_info = {
+            "id": tweet.id,
+            "content": tweet.content,
+            "attachments": attachments,
+            "author": {"id": tweet.author.id, "name": tweet.author.name},
+            "likes": likes,
         }
-        return JSONResponse(content=jsonable_encoder(response), status_code=400)
+        tweets_data.append(tweet_info)
+    return {"result": True, "tweets": tweets_data}
 
-    await session.delete(tweet)
-    await session.commit()
 
-    return {"result": True}
+@app_api.get("/users/me")
+async def get_current_user_info(session: AsyncSession = Depends(async_get_db),
+                                api_key: str = Header(None)):
+    """Эндпойнт получения информации о своём профиле + создание нового пользователя"""
+
+    if not api_key:
+        response = jsonable_encoder({"message": "Please, provide http-header 'Api-key' in your request"})
+        return JSONResponse(content=response, status_code=400)
+    else:
+        res = await session.execute(select(models.User).where(
+            models.User.api_key == api_key).options(
+            selectinload(models.User.following),
+                    selectinload(models.User.subscribers))
+        )
+        user = res.scalar()
+
+        if not user:
+            user = models.User(name=random.choice(NAMES), api_key=api_key)
+            session.add(user)
+            await session.commit()
+
+            return {
+                "result": True,
+                "user": {
+                    "id": user.id,
+                    "name": user.name,
+                    "followers": [],
+                    "following": [],
+                },
+            }
+
+        followers = [{"id": follower.id, "name": follower.name} for follower in user.subscribers]
+        following = [{"id": following.id, "name": following.name} for following in user.following]
+
+        return {
+            "result": True,
+            "user": {
+                "id": user.id,
+                "name": user.name,
+                "followers": followers,
+                "following": following,
+            },
+        }
 
 
 @app_api.get("/users/{user_id}")
@@ -247,72 +316,3 @@ async def get_user_info_by_id(user_id: int, session: AsyncSession = Depends(asyn
             "following": following,
         },
     }
-
-
-@app_api.get("/tweets")
-async def get_tweets_list(session: AsyncSession = Depends(async_get_db),
-                          api_key: str = Header(None)):
-    """Эндпойнт получения ленты с твитами"""
-
-    res_tweets = await session.execute(select(models.Tweet))
-    tweets = res_tweets.scalars().all()
-    tweets_data = []
-
-    for tweet in tweets:
-        attachments = [image.url for image in tweet.image]
-        likes = [{"user_id": like.user.id, "name": like.user.name} for like in tweet.likes]
-        tweet_info = {
-            "id": tweet.id,
-            "content": tweet.content,
-            "attachments": attachments,
-            "author": {"id": tweet.author.id, "name": tweet.author.name},
-            "likes": likes,
-        }
-        tweets_data.append(tweet_info)
-    return {"result": True, "tweets": tweets_data}
-
-
-@app_api.post("/tweets")
-async def post_tweet(tweet: schemas.TweetIn,
-                     session: AsyncSession = Depends(async_get_db),
-                     api_key: str = Header(None)):
-    """Эндпойнт добавления нового твита"""
-
-    res_user = await session.execute(select(models.User).filter(models.User.api_key == api_key))
-    user = res_user.scalar()
-    new_tweet = models.Tweet(content=tweet.tweet_data, user_id=user.id)
-    session.add(new_tweet)
-    await session.commit()
-
-    if tweet.tweet_media_ids:
-        res = await session.execute(select(models.Image).filter(
-            models.Image.id.in_(tweet.tweet_media_ids)
-        ))
-        images = res.scalars().all()
-        for image in images:
-            image.tweet_id = new_tweet.id
-        await session.commit()
-
-    response = {"result": True, "tweet_id": new_tweet.id}
-    return JSONResponse(content=jsonable_encoder(response), status_code=201)
-
-
-@app_api.post("/medias")
-async def download_image_from_tweet(file: UploadFile = File(...),
-                                    session: AsyncSession = Depends(async_get_db),
-                                    api_key: str = Header(None)):
-    """Эндпойнт для загрузки картинок из твита"""
-
-    os.makedirs(OUT_PATH, exist_ok=True)
-
-    file_path = "{}/{}".format(OUT_PATH, file.filename)
-    with open(file_path, mode='wb') as f:
-        shutil.copyfileobj(file.file, f)
-
-
-    new_image = models.Image(url=f"api{file_path}")
-    session.add(new_image)
-    await session.commit()
-
-    response = {"result": True, "media_id": new_image.id}
-    return JSONResponse(content=jsonable_encoder(response), status_code=201)
