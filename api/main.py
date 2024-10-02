@@ -10,9 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-import models
-import schemas
-from database import engine, async_get_db
+import api.models as models
+import api.schemas as schemas
+from api.database import engine, async_get_db
 
 app = FastAPI(title="Twitter Clone")
 app_api = FastAPI()
