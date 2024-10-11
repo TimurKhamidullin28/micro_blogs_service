@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import random
 import shutil
+
 from fastapi import FastAPI, Depends, File, Header, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -10,9 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-import api.models as models
-import api.schemas as schemas
-from api.database import engine, async_get_db
+from models import Base, User, Tweet, Image, Like
+from schemas import TweetIn
+from database import engine, async_get_db
 
 app = FastAPI(title="Twitter Clone")
 app_api = FastAPI()
@@ -28,7 +29,7 @@ OUT_PATH = Path(__file__).parent / 'images'
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
-        await conn.run_sync(models.Base.metadata.create_all)
+        await conn.run_sync(Base.metadata.create_all)
 
 
 @app.on_event("shutdown")
@@ -44,20 +45,20 @@ async def get_root() -> HTMLResponse:
 
 
 @app_api.post("/tweets")
-async def post_tweet(tweet: schemas.TweetIn,
+async def post_tweet(tweet: TweetIn,
                      session: AsyncSession = Depends(async_get_db),
                      api_key: str = Header(None)):
     """Эндпойнт добавления нового твита"""
 
-    res_user = await session.execute(select(models.User).filter(models.User.api_key == api_key))
+    res_user = await session.execute(select(User).filter(User.api_key == api_key))
     user = res_user.scalar()
-    new_tweet = models.Tweet(content=tweet.tweet_data, user_id=user.id)
+    new_tweet = Tweet(content=tweet.tweet_data, user_id=user.id)
     session.add(new_tweet)
     await session.commit()
 
     if tweet.tweet_media_ids:
-        res = await session.execute(select(models.Image).filter(
-            models.Image.id.in_(tweet.tweet_media_ids)
+        res = await session.execute(select(Image).filter(
+            Image.id.in_(tweet.tweet_media_ids)
         ))
         images = res.scalars().all()
         for image in images:
@@ -81,7 +82,7 @@ async def download_image_from_tweet(file: UploadFile = File(...),
         shutil.copyfileobj(file.file, f)
 
 
-    new_image = models.Image(url=f"api{file_path}")
+    new_image = Image(url=f"api{file_path}")
     session.add(new_image)
     await session.commit()
 
@@ -89,7 +90,7 @@ async def download_image_from_tweet(file: UploadFile = File(...),
     return JSONResponse(content=jsonable_encoder(response), status_code=201)
 
 
-@app_api.get("/app/images/{file_name}")
+@app_api.get("/api/images/{file_name}")
 async def get_image_from_dir(file_name: str):
     """Эндпойнт для загрузки сохраненных картинок в ленту с твитами"""
     file_path = f"images/{file_name}"
@@ -100,11 +101,11 @@ async def get_image_from_dir(file_name: str):
 async def delete_tweet_by_id(tweet_id: int, session: AsyncSession = Depends(async_get_db), api_key: str = Header(None)):
     """Эндпойнт для удаления пользователем своего твита по id"""
 
-    res_user = await session.execute(select(models.User).filter(models.User.api_key == api_key))
+    res_user = await session.execute(select(User).filter(User.api_key == api_key))
     user = res_user.scalar()
 
-    res_tweet = await session.execute(select(models.Tweet).filter(
-        models.Tweet.id == tweet_id, models.Tweet.user_id == user.id
+    res_tweet = await session.execute(select(Tweet).filter(
+        Tweet.id == tweet_id, Tweet.user_id == user.id
     ))
     tweet = res_tweet.scalar()
 
@@ -128,13 +129,13 @@ async def like_tweet(tweet_id: int,
                      api_key: str = Header(None)):
     """Эндпойнт, который позволяет пользователю поставить отметку «Нравится» на твит"""
 
-    res_user = await session.execute(select(models.User).filter(models.User.api_key == api_key))
+    res_user = await session.execute(select(User).filter(User.api_key == api_key))
     user = res_user.scalar()
 
-    res_tweet = await session.execute(select(models.Tweet).filter(models.Tweet.id == tweet_id))
+    res_tweet = await session.execute(select(Tweet).filter(Tweet.id == tweet_id))
     tweet = res_tweet.scalar()
 
-    like = models.Like(user_id=user.id, tweet_id=tweet.id)
+    like = Like(user_id=user.id, tweet_id=tweet.id)
     session.add(like)
     await session.commit()
 
@@ -148,11 +149,11 @@ async def delete_like_from_tweet(tweet_id: int,
                                  api_key: str = Header(None)):
     """Эндпойнт, который позволяет пользователю убрать отметку «Нравится» с твита"""
 
-    res_user = await session.execute(select(models.User).filter(models.User.api_key == api_key))
+    res_user = await session.execute(select(User).filter(User.api_key == api_key))
     user = res_user.scalar()
 
-    res_like = await session.execute(select(models.Like).filter(
-        models.Like.tweet_id == tweet_id, models.Like.user_id == user.id
+    res_like = await session.execute(select(Like).filter(
+        Like.tweet_id == tweet_id, Like.user_id == user.id
     ))
     like = res_like.scalar()
 
@@ -168,18 +169,18 @@ async def follow_user(user_id: int,
                      api_key: str = Header(None)):
     """Эндпойнт, который позволяет пользователю зафоловить другого пользователя"""
 
-    res_curr_user = await session.execute(select(models.User).filter(
-        models.User.api_key == api_key).options(
-            selectinload(models.User.following),
-                    selectinload(models.User.subscribers)
+    res_curr_user = await session.execute(select(User).filter(
+        User.api_key == api_key).options(
+            selectinload(User.following),
+                    selectinload(User.subscribers)
         )
     )
     current_user = res_curr_user.scalar()
 
-    res_follow_user = await session.execute(select(models.User).filter(
-        models.User.id == user_id).options(
-            selectinload(models.User.following),
-                    selectinload(models.User.subscribers)
+    res_follow_user = await session.execute(select(User).filter(
+        User.id == user_id).options(
+            selectinload(User.following),
+                    selectinload(User.subscribers)
         )
     )
     following_user = res_follow_user.scalar()
@@ -197,18 +198,18 @@ async def unsubscribe_from_user(user_id: int,
                      api_key: str = Header(None)):
     """Эндпойнт, который позволяет пользователю убрать подписку на другого пользователя"""
 
-    res_curr_user = await session.execute(select(models.User).filter(
-        models.User.api_key == api_key).options(
-            selectinload(models.User.following),
-                    selectinload(models.User.subscribers)
+    res_curr_user = await session.execute(select(User).filter(
+        User.api_key == api_key).options(
+            selectinload(User.following),
+                    selectinload(User.subscribers)
         )
     )
     current_user = res_curr_user.scalar()
 
-    res_follow_user = await session.execute(select(models.User).filter(
-        models.User.id == user_id).options(
-            selectinload(models.User.following),
-                    selectinload(models.User.subscribers)
+    res_follow_user = await session.execute(select(User).filter(
+        User.id == user_id).options(
+            selectinload(User.following),
+                    selectinload(User.subscribers)
         )
     )
     following_user = res_follow_user.scalar()
@@ -224,7 +225,7 @@ async def get_tweets_list(session: AsyncSession = Depends(async_get_db),
                           api_key: str = Header(None)):
     """Эндпойнт получения ленты с твитами"""
 
-    res_tweets = await session.execute(select(models.Tweet))
+    res_tweets = await session.execute(select(Tweet))
     tweets = res_tweets.scalars().all()
     tweets_data = []
 
@@ -251,15 +252,15 @@ async def get_current_user_info(session: AsyncSession = Depends(async_get_db),
         response = jsonable_encoder({"message": "Please, provide http-header 'Api-key' in your request"})
         return JSONResponse(content=response, status_code=400)
     else:
-        res = await session.execute(select(models.User).where(
-            models.User.api_key == api_key).options(
-            selectinload(models.User.following),
-                    selectinload(models.User.subscribers))
+        res = await session.execute(select(User).where(
+            User.api_key == api_key).options(
+            selectinload(User.following),
+                    selectinload(User.subscribers))
         )
         user = res.scalar()
 
         if not user:
-            user = models.User(name=random.choice(NAMES), api_key=api_key)
+            user = User(name=random.choice(NAMES), api_key=api_key)
             session.add(user)
             await session.commit()
 
@@ -291,10 +292,10 @@ async def get_current_user_info(session: AsyncSession = Depends(async_get_db),
 async def get_user_info_by_id(user_id: int, session: AsyncSession = Depends(async_get_db)):
     """Эндпойнт получения информации о произвольном профиле по его id"""
 
-    res = await session.execute(select(models.User).where(
-        models.User.id == user_id).options(
-        selectinload(models.User.following),
-        selectinload(models.User.subscribers))
+    res = await session.execute(select(User).where(
+        User.id == user_id).options(
+        selectinload(User.following),
+        selectinload(User.subscribers))
     )
     user = res.scalar()
     if not user:

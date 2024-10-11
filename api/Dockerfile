@@ -4,8 +4,8 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt \
     && rm -rf /root/.cache/pip
 
-COPY . /app/
+COPY . /api/
 
-WORKDIR /app
+WORKDIR /api
 
 CMD ["uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"]

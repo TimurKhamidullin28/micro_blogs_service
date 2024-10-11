@@ -1,4 +1,4 @@
-from api.database import Base
+from database import Base
 from datetime import datetime, timezone
 from typing import List
 from sqlalchemy import Column, ForeignKey, Integer, Table
