@@ -1,58 +1,42 @@
-from typing import AsyncGenerator
-from dotenv import dotenv_values
 from httpx import AsyncClient, ASGITransport
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from api.database import Base
+from api.models import Base, User
 from api.database import async_get_db as get_db_session
 from api.main import app_api as api
-from api.models import User
 
-config = dotenv_values(".env.test")
-
-DB_USER = config.get("POSTGRES_USER", "user")
-DB_PASSWORD = config.get("POSTGRES_PASSWORD", "password")
-DB_NAME = config.get("POSTGRES_DB", "db")
-
-DATABASE_URL_TEST = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@postgres_test:5432/{DB_NAME}"
-
-engine = create_async_engine(DATABASE_URL_TEST, echo=True)
-async_session_maker = async_sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
-)
-
-Base.metadata.bind = engine
+DATABASE_URL_TEST = f"postgresql+asyncpg://admin:admin@localhost:5433/test_micro_blogs"
 
 
-def override_get_async_session() -> AsyncGenerator[AsyncSession, None]:
-    with async_session_maker() as session:
-        yield session
-
-api.dependency_overrides[get_db_session] = override_get_async_session
-
-@pytest_asyncio.fixture(autouse=True, scope="session")
-async def create_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    async with async_session_maker() as session:
-        first_user = User(name="Ivan", api_key="test-key-ivan")
-        second_user = User(name="Anton", api_key="test-anton-key")
-        session.add(first_user)
-        session.add(second_user)
-        await session.close()
-    yield
+@pytest.fixture()
+async def db_session():
+    engine = create_async_engine(DATABASE_URL_TEST, echo=True)
+    async_session = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    async with async_session() as session:
+        test_user = User(name="Anton", api_key="test")
+        new_user = User(name="Ivan", api_key="test_key")
+        session.add(test_user)
+        session.add(new_user)
+        yield session
+        await session.close()
 
 
-@pytest_asyncio.fixture(scope="session")
-async def async_client() -> AsyncClient:
-    transport = ASGITransport(app=api)
+@pytest.fixture()
+def test_app(db_session: AsyncSession):
+    api.dependency_overrides[get_db_session] = lambda: db_session
+    return api
+
+
+@pytest.fixture()
+async def async_client(test_app):
+    transport = ASGITransport(app=test_app)
     async with AsyncClient(
-            transport=transport,
-            base_url="http://localhost:8000/",
-            headers={"api-key": "test"},
+        transport=transport,
+        base_url="http://localhost:8000/",
+        headers={"api-key": "test"},
     ) as client:
         yield client
